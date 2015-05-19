@@ -17,7 +17,7 @@ package com.twitter.zipkin.storage.anormdb
 
 import anorm.SqlParser._
 import anorm._
-import com.twitter.util.{Duration, Future, FuturePool, Time}
+import com.twitter.util.{Duration, Future, FuturePool, Time, Try}
 import com.twitter.zipkin.Constants
 import com.twitter.zipkin.common._
 import com.twitter.zipkin.storage.{IndexedTraceId, SpanStore, TraceIdDuration}
@@ -25,20 +25,13 @@ import com.twitter.zipkin.util.Util
 import java.nio.ByteBuffer
 import java.sql.{Connection, PreparedStatement}
 
-// TODO: connection pooling for real parallelism
 class AnormSpanStore(
   db: SpanStoreDB,
-  openCon: Option[Connection] = None,
   pool: FuturePool = FuturePool.unboundedPool
 ) extends SpanStore {
-  // Database connection object
-  private[this] implicit val conn = openCon match {
-    case None => db.getConnection()
-    case Some(con) => con
-  }
 
   def close(deadline: Time): Future[Unit] = pool {
-    conn.close()
+    db.close()
   }
 
   implicit object byteArrayToStatement extends ToStatement[Array[Byte]] {
@@ -123,12 +116,43 @@ class AnormSpanStore(
         }
       }
 
-    // This parallelism is a lie. There's only one DB connection (for now anyway).
-    Future.join(Seq(
-      if (hasSpans) pool { spanBatch.execute() } else Future.Done,
-      if (hasAnns) pool { annBatch.execute() } else Future.Done,
-      if (hasBinAnns) pool { binAnnBatch.execute() } else Future.Done
-    ))
+    val batches = Seq(
+      if (hasSpans) Some(spanBatch) else None,
+      if (hasAnns) Some(annBatch) else None,
+      if (hasBinAnns) Some(binAnnBatch) else None
+    ).flatten
+
+    executeBatches(batches).unit
+  }
+
+  def executeBatches( batches : Seq[BatchSql] ) : Future[Try[Seq[Array[Int]]]] = {
+    withConnection {
+      implicit conn : Connection =>
+      db.withTransaction { implicit conn : Connection =>
+        batches.map { _.execute() }
+      }.onFailure { ex =>
+        throw ex
+      }
+    }
+  }
+
+  def withConnection[T](f: (Connection) => T ) = {
+    db.getPooledConnection match {
+      case Some(conn) =>
+        pool {
+          try {
+            val resp = f(conn.connection)
+            conn.release()
+            resp
+          } catch {
+            case t : Throwable =>
+              conn.close()
+              throw t
+          }
+        }
+      case None =>
+        throw new RuntimeException("No db connections available")
+    }
   }
 
   def setTimeToLive(traceId: Long, ttl: Duration): Future[Unit] =
@@ -141,7 +165,8 @@ class AnormSpanStore(
     SELECT trace_id FROM zipkin_spans WHERE trace_id IN (%s)
   """.format(ids.mkString(",")))
 
-  def tracesExist(traceIds: Seq[Long]): Future[Set[Long]] = pool {
+  def tracesExist(traceIds: Seq[Long]): Future[Set[Long]] = withConnection {
+    implicit conn : Connection =>
     tracesExistSql(traceIds)
       .as(long("trace_id") *)
       .toSet
@@ -214,15 +239,15 @@ class AnormSpanStore(
 
   // parallel queries here are also a lie (see above).
   def getSpansByTraceIds(ids: Seq[Long]): Future[Seq[Seq[Span]]] = {
-    val spans = pool {
+    val spans = withConnection { implicit conn : Connection =>
       spansSql(ids).as(spansResults *)
     } map { _.distinct.groupBy(_.traceId) }
 
-    val anns = pool {
+    val anns = withConnection { implicit conn : Connection =>
       annsSql(ids).as(annsResults *)
     } map { _.groupBy(_._1) }
 
-    val binAnns = pool {
+    val binAnns = withConnection { implicit conn : Connection =>
       binAnnsSql(ids).as(binAnnsResults *)
     } map { _.groupBy(_._1) }
 
@@ -261,7 +286,7 @@ class AnormSpanStore(
     spanName: Option[String],
     endTs: Long,
     limit: Int
-  ): Future[Seq[IndexedTraceId]] = pool {
+  ): Future[Seq[IndexedTraceId]] = withConnection { implicit conn : Connection =>
     idsByNameSql
       .on("service_name" -> serviceName)
       .on("span_name" -> spanName.getOrElse(""))
@@ -315,7 +340,7 @@ class AnormSpanStore(
   ): Future[Seq[IndexedTraceId]] =
     if (Constants.CoreAnnotations.contains(annotation))
       Future.value(Seq.empty)
-    else pool {
+    else withConnection { implicit conn : Connection =>
       val sql = value
         .map(_ => byAnnValSql)
         .getOrElse(byAnnSql)
@@ -345,7 +370,8 @@ class AnormSpanStore(
     long("created_ts")
   ) map { case a~b~c => TraceIdDuration(a, b.getOrElse(0), c) }
 
-  def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]] = pool {
+  def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]] = withConnection {
+    implicit conn : Connection =>
     byDurationSql(traceIds)
       .as(byDurationResults *)
   }
@@ -357,7 +383,8 @@ class AnormSpanStore(
     |ORDER BY service_name ASC
   """.stripMargin)
 
-  def getAllServiceNames: Future[Set[String]] = pool {
+  def getAllServiceNames: Future[Set[String]] = withConnection {
+    implicit conn : Connection =>
     svcNamesSql.as(str("service_name") *).toSet
   }
 
@@ -369,7 +396,8 @@ class AnormSpanStore(
     |ORDER BY span_name ASC
   """.stripMargin)
 
-  def getSpanNames(service: String): Future[Set[String]] = pool {
+  def getSpanNames(service: String): Future[Set[String]] = withConnection {
+    implicit conn : Connection =>
     spanNamesSql.on("service" -> service).as(str("span_name") *).toSet
   }
 }

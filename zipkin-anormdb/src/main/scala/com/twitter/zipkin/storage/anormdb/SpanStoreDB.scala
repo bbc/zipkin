@@ -18,8 +18,74 @@ package com.twitter.zipkin.storage.anormdb
 import anorm._
 import anorm.SqlParser._
 import java.sql.{Blob, Connection, DriverManager, SQLException}
+import com.twitter.util.{Try, Return, Throw}
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.{ AtomicInteger, AtomicBoolean }
+import collection.JavaConversions._
+import scala.collection.mutable.ArrayBuffer
 
-case class SpanStoreDB(location: String) {
+case class PooledConnection( val connection : Connection, pool : ConnectionPool ) {
+  def release() {
+    pool.release(connection)
+  }
+
+  def close() {
+    pool.close(connection)
+  }
+}
+
+class ConnectionPool(db : SpanStoreDB, maxSize : Int) {
+
+  private[this] val connections : ArrayBlockingQueue[Connection] = new ArrayBlockingQueue[Connection](maxSize)
+  private[this] val isClosed  = new AtomicBoolean(false)
+  private[this] val leasedConnectionsCount = new AtomicInteger(0)
+
+  def get() = {
+    if (isClosed.get){
+      None
+    } else {
+      val conn = connections.poll
+      if (conn == null){
+        if (leasedConnectionsCount.get() < maxSize){
+          val freshConnection = db.getConnection()
+          leasedConnectionsCount.incrementAndGet()
+          Some(PooledConnection(freshConnection, this))
+        } else {
+          None
+        }
+      } else {
+        leasedConnectionsCount.incrementAndGet()
+        Some(PooledConnection(conn, this))
+      }
+    }
+  }
+
+  def release(conn : Connection){
+    leasedConnectionsCount.decrementAndGet()
+    if (isClosed.get || !connections.offer(conn)){
+      conn.close()
+    }
+  }
+
+  def close(conn : Connection){
+    leasedConnectionsCount.decrementAndGet()
+    try {
+      if (!conn.isClosed())
+        conn.close()
+    } finally {
+      connections.remove(conn)
+    }
+  }
+
+  def close() {
+    isClosed.set(true)
+    val target = ArrayBuffer[Connection]()
+    connections.drainTo(target)
+    target.map( _.close() )
+  }
+}
+
+case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
   val (driver, blobType, autoIncrementSql) = location.split(":").toList match {
     case "sqlite" :: _ =>
       ("org.sqlite.JDBC", "BLOB", "INTEGER PRIMARY KEY AUTOINCREMENT")
@@ -40,11 +106,13 @@ case class SpanStoreDB(location: String) {
       throw new IllegalArgumentException("Unknown DB location: %s".format(location))
   }
 
+  val connectionPool = new ConnectionPool(this, connectionPoolSize)
+
   // Load the driver
   Class.forName(driver)
 
   /**
-   * Gets a java.sql.Connection to the SQL database.
+   * Gets an unmanaged java.sql.Connection to the SQL database.
    *
    * Example usage:
    *
@@ -54,6 +122,42 @@ case class SpanStoreDB(location: String) {
    */
   def getConnection() = {
     DriverManager.getConnection("jdbc:" + location)
+  }
+
+  /**
+    *  shutdown connection pool
+    */
+  def close() = {
+    connectionPool.close()
+  }
+
+  /**
+    *  Gets a managed java.sql.Connection to the SQL database. Call release() when done or close() to remove from pool
+    */
+  def getPooledConnection() : Option[PooledConnection] = {
+    connectionPool.get
+  }
+
+  /**
+   * Execute SQL in a transaction.
+   */
+  def withTransaction[A](code: Connection => A)(implicit conn : Connection): Try[A] = {
+    val autoCommit = conn.getAutoCommit
+    try {
+      conn.setAutoCommit(false)
+      val result = code(conn)
+      conn.commit()
+      Return(result)
+    }
+    catch {
+      case e: Throwable => {
+        conn.rollback()
+        Throw(e)
+      }
+    }
+    finally {
+      conn.setAutoCommit(autoCommit)
+    }
   }
 
   /**
