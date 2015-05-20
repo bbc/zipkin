@@ -56,6 +56,6 @@ object Deploy extends Build {
       twitterServer
     )
   ).dependsOn(
-    collectorService, anormDB, receiverScribe, zookeeper
+    sampler, collectorService, anormDB, receiverScribe, zookeeper
   )
 }
