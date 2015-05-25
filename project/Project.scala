@@ -540,6 +540,7 @@ object Zipkin extends Build {
     libraryDependencies ++= Seq(
       finagle("zipkin"),
       finagle("stats"),
+      anormDriverDependencies("mysql"),
       twitterServer
     )
   ).dependsOn(
