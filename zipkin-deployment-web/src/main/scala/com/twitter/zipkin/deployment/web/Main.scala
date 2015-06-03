@@ -10,6 +10,7 @@ import com.twitter.zipkin.zookeeper.ZooKeeperClientFactory
 import com.twitter.zipkin.web.ZipkinWebFactory
 import com.twitter.zipkin.query.ThriftQueryService
 import com.twitter.zipkin.query.constants.DefaultAdjusters
+import com.twitter.zipkin.storage.anormdb.AnormAggregatesWithSpanStore
 
 object Main extends TwitterServer with Closer
   with ZooKeeperClientFactory
@@ -17,8 +18,10 @@ object Main extends TwitterServer with Closer
   with AnormDBSpanStoreFactory
 {
   def main() {
-    val store = newAnormSpanStore()
-    val query = new ThriftQueryService(store, adjusters = DefaultAdjusters)
+    val storeDB = newSpanStoreDB()
+    val store = newAnormSpanStore(storeDB)
+    val anormAggregates = new AnormAggregatesWithSpanStore(storeDB)
+    val query = new ThriftQueryService(store, aggsStore = anormAggregates, adjusters = DefaultAdjusters)
     val webService = newWebServer(query, statsReceiver.scope("web"))
     val web = Http.serve(webServerPort(), webService)
 

@@ -19,7 +19,8 @@ import anorm._
 import anorm.SqlParser._
 import java.sql.{Blob, Connection, DriverManager, SQLException}
 import com.twitter.util.{Try, Return, Throw}
-import java.util.concurrent.ArrayBlockingQueue
+import com.twitter.util.{Await, Duration, Future, FuturePool, Time, Try}
+import java.util.concurrent.{ TimeUnit, ArrayBlockingQueue }
 import java.util.concurrent.atomic.{ AtomicInteger, AtomicBoolean }
 import collection.JavaConversions._
 import scala.collection.mutable.ArrayBuffer
@@ -44,7 +45,11 @@ class ConnectionPool(db : SpanStoreDB, maxSize : Int) {
     if (isClosed.get){
       None
     } else {
-      val conn = connections.poll
+      val conn = if (leasedConnectionsCount.get() < maxSize){
+        connections.poll
+      } else {
+        connections.poll(1, TimeUnit.SECONDS)
+      }
       if (conn == null){
         if (leasedConnectionsCount.get() < maxSize){
           val freshConnection = db.getConnection()
@@ -85,7 +90,9 @@ class ConnectionPool(db : SpanStoreDB, maxSize : Int) {
   }
 }
 
-case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
+case class SpanStoreDB(location: String,
+                       connectionPoolSize : Int = 1,
+                       pool: FuturePool = FuturePool.unboundedPool) {
   val (driver, blobType, autoIncrementSql) = location.split(":").toList match {
     case "sqlite" :: _ =>
       ("org.sqlite.JDBC", "BLOB", "INTEGER PRIMARY KEY AUTOINCREMENT")
@@ -136,6 +143,25 @@ case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
     */
   def getPooledConnection() : Option[PooledConnection] = {
     connectionPool.get
+  }
+
+  def withConnection[T](f: (Connection) => T ) = {
+    connectionPool.get match {
+      case Some(conn) =>
+        pool {
+          try {
+            val resp = f(conn.connection)
+            conn.release()
+            resp
+          } catch {
+            case t : Throwable =>
+              conn.close()
+              throw t
+          }
+        }
+      case None =>
+        throw new RuntimeException("No db connections available")
+    }
   }
 
   /**
@@ -199,14 +225,13 @@ case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
   /**
    * Set up the database tables.
    *
-   * Returns an open database connection, so remember to close it, for example
-   * with `(new SpanStoreDB()).install().close()`
    */
-  def install(clear: Boolean = false): Connection = {
-    implicit val con = this.getConnection()
-    if (clear) SQL("DROP TABLE IF EXISTS zipkin_spans").execute()
-    SQL(
-      """CREATE TABLE IF NOT EXISTS zipkin_spans (
+  def install(clear: Boolean = false) : Unit = {
+    val installJob = withConnection {
+      implicit conn : Connection =>
+      if (clear) SQL("DROP TABLE IF EXISTS zipkin_spans").execute()
+      SQL(
+        """CREATE TABLE IF NOT EXISTS zipkin_spans (
         |  span_id BIGINT NOT NULL,
         |  parent_id BIGINT,
         |  trace_id BIGINT NOT NULL,
@@ -217,9 +242,9 @@ case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
         |)
       """.stripMargin).execute()
 
-    if (clear) SQL("DROP TABLE IF EXISTS zipkin_annotations").execute()
-    SQL(
-      """CREATE TABLE IF NOT EXISTS zipkin_annotations (
+      if (clear) SQL("DROP TABLE IF EXISTS zipkin_annotations").execute()
+      SQL(
+        """CREATE TABLE IF NOT EXISTS zipkin_annotations (
         |  span_id BIGINT NOT NULL,
         |  trace_id BIGINT NOT NULL,
         |  span_name VARCHAR(255) NOT NULL,
@@ -232,9 +257,9 @@ case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
         |)
       """.stripMargin).execute()
 
-    if (clear) SQL("DROP TABLE IF EXISTS zipkin_binary_annotations").execute()
-    SQL(
-      """CREATE TABLE IF NOT EXISTS zipkin_binary_annotations (
+      if (clear) SQL("DROP TABLE IF EXISTS zipkin_binary_annotations").execute()
+      SQL(
+        """CREATE TABLE IF NOT EXISTS zipkin_binary_annotations (
         |  span_id BIGINT NOT NULL,
         |  trace_id BIGINT NOT NULL,
         |  span_name VARCHAR(255) NOT NULL,
@@ -247,18 +272,18 @@ case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
         |)
       """.stripMargin.format(blobType)).execute()
 
-    if (clear) SQL("DROP TABLE IF EXISTS zipkin_dependencies").execute()
-    SQL(
-      """CREATE TABLE IF NOT EXISTS zipkin_dependencies (
+      if (clear) SQL("DROP TABLE IF EXISTS zipkin_dependencies").execute()
+      SQL(
+        """CREATE TABLE IF NOT EXISTS zipkin_dependencies (
         |  dlid %s,
         |  start_ts BIGINT NOT NULL,
         |  end_ts BIGINT NOT NULL
         |)
       """.stripMargin.format(autoIncrementSql)).execute()
 
-    if (clear) SQL("DROP TABLE IF EXISTS zipkin_dependency_links").execute()
-    SQL(
-      """CREATE TABLE IF NOT EXISTS zipkin_dependency_links (
+      if (clear) SQL("DROP TABLE IF EXISTS zipkin_dependency_links").execute()
+      SQL(
+        """CREATE TABLE IF NOT EXISTS zipkin_dependency_links (
         |  dlid BIGINT NOT NULL,
         |  parent VARCHAR(255) NOT NULL,
         |  child VARCHAR(255) NOT NULL,
@@ -269,6 +294,7 @@ case class SpanStoreDB(location: String, connectionPoolSize : Int = 1) {
         |  m4 DOUBLE PRECISION NOT NULL
         |)
       """.stripMargin).execute()
-    con
+    }
+    Await.result(installJob)
   }
 }

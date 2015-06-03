@@ -269,7 +269,7 @@ object Zipkin extends Build {
     settings = defaultSettings
   ).settings(
     libraryDependencies ++= Seq(
-      "com.typesafe.play" %% "anorm" % "2.3.7",
+      "com.typesafe.play" %% "anorm" % "2.4.0",
       anormDriverDependencies("sqlite-persistent")
     ) ++ scalaTestDeps,
 
@@ -423,6 +423,8 @@ object Zipkin extends Build {
       base = file("zipkin-aggregate"),
       settings = defaultSettings ++ assemblySettings
     ).settings(
+      libraryDependencies ++= Seq(anormDriverDependencies("mysql")),
+
       mergeStrategy in assembly <<= (mergeStrategy in assembly) { (old) =>
         {
           case PathList("org", xs @ _*) => MergeStrategy.first
@@ -434,7 +436,7 @@ object Zipkin extends Build {
       },
       BuildProperties.buildPropertiesPackage := "com.twitter.zipkin",
       resourceGenerators in Compile <+= BuildProperties.buildPropertiesWrite
-  ).dependsOn(cassandra, common)
+  ).dependsOn(cassandra, anormDB, common)
 
 
 

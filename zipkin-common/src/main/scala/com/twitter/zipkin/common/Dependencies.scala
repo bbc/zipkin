@@ -41,6 +41,13 @@ object DependencyLink {
       DependencyLink(l.parent, l.child, Monoid.plus(l.durationMoments, r.durationMoments))
     }
   }
+
+  def mergeDependencyLinks ( dlinks : Seq[DependencyLink] ) : Seq[DependencyLink] = {
+    val parentChildLinks = dlinks.groupBy{ dlink => (dlink.parent, dlink.child) }.values
+    parentChildLinks.map {
+     _.reduceLeft( sg.plus(_, _) )
+    }.toSeq
+  }
 }
 
 /**
