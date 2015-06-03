@@ -69,7 +69,7 @@ class AnormAggregator(db : SpanStoreDB, aggregates : Aggregates) {
   }
 
   private[this] def byTimeRangeDependencyLinksSql(startTimeNanos : Long, endTimeNanos : Long) = SQL("""
-    |SELECT c.service_name AS child_service_name,p.service_name AS parent_service_name,s.duration AS duration, s.created_ts AS created_ts 
+    |SELECT p.service_name AS parent_service_name,c.service_name AS child_service_name,s.duration AS duration, s.created_ts AS created_ts 
     |FROM zipkin_spans s join zipkin_annotations p join zipkin_annotations c 
     |WHERE s.span_id=c.span_id 
     |AND s.parent_id=p.span_id
