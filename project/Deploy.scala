@@ -41,7 +41,7 @@ object Deploy extends Build {
       twitterServer
     )
   ).dependsOn(
-    web, anormDB, query, zookeeper
+    web, zipkinAggregate, anormDB, query, zookeeper
   )
 
   lazy val deployedCollector = Project(
