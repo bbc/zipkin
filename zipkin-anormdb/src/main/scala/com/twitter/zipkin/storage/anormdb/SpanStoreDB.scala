@@ -241,6 +241,8 @@ case class SpanStoreDB(location: String,
         |  created_ts BIGINT
         |)
       """.stripMargin).execute()
+      SQL("CREATE INDEX span_spanid_idx ON zipkin_spans (span_id)").execute()
+      SQL("CREATE INDEX span_parentid_idx ON zipkin_spans (parent_id)").execute()
 
       if (clear) SQL("DROP TABLE IF EXISTS zipkin_annotations").execute()
       SQL(
@@ -256,6 +258,7 @@ case class SpanStoreDB(location: String,
         |  duration BIGINT
         |)
       """.stripMargin).execute()
+      SQL("CREATE INDEX anno_span_idx ON zipkin_annotations(span_id)").execute()
 
       if (clear) SQL("DROP TABLE IF EXISTS zipkin_binary_annotations").execute()
       SQL(
