@@ -27,18 +27,21 @@ import java.nio.ByteBuffer
 import java.sql.{Connection, PreparedStatement}
 import com.twitter.zipkin.storage.anormdb.SpanStoreDB
 import com.twitter.zipkin.storage.Aggregates
+import com.twitter.logging.Logger
 
 class AnormAggregator(db : SpanStoreDB, aggregates : Aggregates) {
 
+  val log = Logger.get("anormAggregator")
   case class SpanSummary( minTime : Long, maxTime : Long, spanCount : Long ){
-    val stepSize = ((maxTime - minTime) * Math.min(10000.0 / spanCount, 1)).toLong
+    val steps = Math.max(spanCount / 10000, 1)
+    val stepSize = ((maxTime - minTime) / steps).toLong
     val iterator = Range.Long(minTime, maxTime+1, stepSize).iterator
   }
 
   def apply() : Future[Unit] = {
     getSpanSummary() flatMap { 
       case Some(spanSummary) =>
-        println(s"Aggregating ${spanSummary.spanCount} spans with step size ${spanSummary.stepSize}")
+        log.info(s"Calculating aggregates for ${spanSummary.spanCount} new spans in ${spanSummary.steps} batches")
         val rangeIter = spanSummary.iterator
         val start = rangeIter.next
         calculateDependencies( start, rangeIter, Future.value(Monoid.zero[Dependencies]) )
@@ -46,10 +49,10 @@ class AnormAggregator(db : SpanStoreDB, aggregates : Aggregates) {
         Future.Unit
     } flatMap {
       case dependencies : Dependencies =>
-          println(s"Storing $dependencies")
-      aggregates.storeDependencies(dependencies)
+         log.debug("Storing dependencies")
+         aggregates.storeDependencies(dependencies)
       case _ =>
-        println("No new span dependencies to store")
+         log.info("Aggregated span dependencies already up-to-date")
         Future.Unit
     }
   }
@@ -90,7 +93,9 @@ class AnormAggregator(db : SpanStoreDB, aggregates : Aggregates) {
     try {
         byTimeRangeDependencyLinksSql(startTimeNanos, endTimeNanos).as(dependencyLinksResults *)
     } catch {
-      case e : Throwable => println(e); throw e;
+      case e : Throwable =>
+        log.error("Failed to fetch dependency links", e);
+        throw e;
     }
   }
 
@@ -101,11 +106,9 @@ class AnormAggregator(db : SpanStoreDB, aggregates : Aggregates) {
       getDependencyLinks(startTimeNanos, endTimeNanos) flatMap { dlinks =>
         val summedDependencyLinks = mergeDependencyLinks(dlinks)
         val updatedDependencies = dependencies.map { mergeDependenciesForTimeRange(startTimeNanos, endTimeNanos, summedDependencyLinks.toSeq, _) }
-        println(s"Updated dependencies are $updatedDependencies")
         calculateDependencies(endTimeNanos, timeRangeIter, updatedDependencies)
       }
     } else {
-      println("No more ranges in time range")
       dependencies
     }
   }

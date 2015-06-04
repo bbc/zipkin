@@ -27,10 +27,14 @@ import java.sql.{Connection, PreparedStatement}
 import com.twitter.zipkin.storage.Aggregates
 import com.twitter.algebird.{ Moments, Monoid, MomentsGroup }
 import com.twitter.conversions.time._
+import com.twitter.logging.Logger
 
 class AnormAggregatesWithSpanStore(
   db: SpanStoreDB
 ) extends Aggregates {
+
+
+  val log = Logger.get("anormAggregatesWithSpanStore")
 
   def close() : Unit =  db.close()
 
@@ -51,7 +55,8 @@ class AnormAggregatesWithSpanStore(
         .on("startTs" -> dependencies.startTime.inMicroseconds)
         .on("endTs" -> dependencies.endTime.inMicroseconds)
         .executeInsert()
-      println(s"Inserting ${dependencies.links.length} links")
+
+      log.debug(s"Storing ${dependencies.links.length} dependency links")
 
       dependencies.links.foreach { link =>
         SQL("""INSERT INTO zipkin_dependency_links
