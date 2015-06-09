@@ -56,15 +56,31 @@ define(
       $modal.find('#dependencyModalChild').html($childElement);
 
       $modal.find('#dependencyNumCalls').text(moments.count);
-      $modal.find('#dependencyMean').text(moments.mean);
-      $modal.find('#dependencyVariance').text(moments.variance);
-      $modal.find('#dependencyStddev').text(moments.stddev);
-      $modal.find('#dependencySkewness').text(moments.skewness);
-      $modal.find('#dependencyKurtosis').text(moments.kurtosis);
+      $modal.find('#dependencyMean').text(formatNanos(moments.mean));
+      $modal.find('#dependencyVariance').text(formatNanos(moments.variance));
+      $modal.find('#dependencyStddev').text(formatNanos(moments.stddev));
+	$modal.find('#dependencySkewness').text(formatMeasure(moments.skewness));
+	$modal.find('#dependencyKurtosis').text(formatMeasure(moments.kurtosis));
 
       $('#serviceModal').modal('hide');
       $modal.modal('show');
     }
+
+    function formatMeasure(measure){
+	if (measure) {
+	    return measure.toFixed(4)
+	} else {
+	    return "-";
+	}
+    }	  
+
+    function formatNanos(nanos) {
+	if (nanos){
+	    return nanos.toFixed() + " ns";
+	} else {
+	    return "-";
+	}
+    }	  
 
     function renderServiceDataModal(event, data) {
       var $modal = $('#serviceModal');
