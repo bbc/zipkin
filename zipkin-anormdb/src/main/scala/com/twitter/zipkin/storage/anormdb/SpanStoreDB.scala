@@ -24,6 +24,7 @@ import java.util.concurrent.{ TimeUnit, ArrayBlockingQueue }
 import java.util.concurrent.atomic.{ AtomicInteger, AtomicBoolean }
 import collection.JavaConversions._
 import scala.collection.mutable.ArrayBuffer
+import com.twitter.logging.Logger
 
 case class PooledConnection( val connection : Connection, pool : ConnectionPool ) {
   def release() {
@@ -92,7 +93,8 @@ class ConnectionPool(db : SpanStoreDB, maxSize : Int) {
 
 case class SpanStoreDB(location: String,
                        connectionPoolSize : Int = 1,
-                       pool: FuturePool = FuturePool.unboundedPool) {
+                       pool: FuturePool = FuturePool.unboundedPool,
+                       log : Logger = Logger.get("SpanStoreDB")) {
   val (driver, blobType, autoIncrementSql) = location.split(":").toList match {
     case "sqlite" :: _ =>
       ("org.sqlite.JDBC", "BLOB", "INTEGER PRIMARY KEY AUTOINCREMENT")
@@ -227,6 +229,7 @@ case class SpanStoreDB(location: String,
    *
    */
   def install(clear: Boolean = false) : Unit = {
+
     val installJob = withConnection {
       implicit conn : Connection =>
       if (clear) SQL("DROP TABLE IF EXISTS zipkin_spans").execute()
@@ -242,14 +245,6 @@ case class SpanStoreDB(location: String,
         |)
       """.stripMargin).execute()
 
-      if (SQL("SHOW INDEX from zipkin_spans WHERE key_name='span_spanid_idx'")().isEmpty()){
-        SQL("CREATE INDEX span_spanid_idx ON zipkin_spans (span_id)").execute()
-      }
-
-      if (SQL("SHOW INDEX from zipkin_spans WHERE key_name='span_parentid_idx'")().isEmpty()){
-        SQL("CREATE INDEX span_parentid_idx ON zipkin_spans (parent_id)").execute()
-      }
-
       if (clear) SQL("DROP TABLE IF EXISTS zipkin_annotations").execute()
       SQL(
         """CREATE TABLE IF NOT EXISTS zipkin_annotations (
@@ -264,10 +259,6 @@ case class SpanStoreDB(location: String,
         |  duration BIGINT
         |)
       """.stripMargin).execute()
-
-      if (SQL("SHOW INDEX from zipkin_annotations WHERE key_name='anno_span_idx'")().isEmpty()){
-          SQL("CREATE INDEX anno_span_idx ON zipkin_annotations(span_id)").execute()
-      }
 
       if (clear) SQL("DROP TABLE IF EXISTS zipkin_binary_annotations").execute()
       SQL(
@@ -305,7 +296,25 @@ case class SpanStoreDB(location: String,
         |  m3 DOUBLE PRECISION NOT NULL,
         |  m4 DOUBLE PRECISION NOT NULL
         |)
+      
       """.stripMargin).execute()
+
+
+      try {
+        if (SQL("SHOW INDEX from zipkin_spans WHERE key_name='span_spanid_idx'")().isEmpty()){
+          SQL("CREATE INDEX span_spanid_idx ON zipkin_spans (span_id)").execute()
+        }
+
+        if (SQL("SHOW INDEX from zipkin_spans WHERE key_name='span_parentid_idx'")().isEmpty()){
+          SQL("CREATE INDEX span_parentid_idx ON zipkin_spans (parent_id)").execute()
+        }
+
+        if (SQL("SHOW INDEX from zipkin_annotations WHERE key_name='anno_span_idx'")().isEmpty()){
+          SQL("CREATE INDEX anno_span_idx ON zipkin_annotations(span_id)").execute()
+        }
+      } catch {
+        case e : Throwable => log.warning(e, "Unable to create indexes on span store db") 
+      }
     }
     Await.result(installJob)
   }
