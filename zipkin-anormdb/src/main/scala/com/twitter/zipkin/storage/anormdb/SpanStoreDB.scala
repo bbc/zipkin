@@ -298,8 +298,11 @@ case class SpanStoreDB(location: String,
         |)
       
       """.stripMargin).execute()
+    }
+    Await.result(installJob)
 
-
+    val installIndexesJob = withConnection {
+      implicit conn : Connection =>
       try {
         if (SQL("SHOW INDEX from zipkin_spans WHERE key_name='span_spanid_idx'")().isEmpty()){
           SQL("CREATE INDEX span_spanid_idx ON zipkin_spans (span_id)").execute()
@@ -313,9 +316,9 @@ case class SpanStoreDB(location: String,
           SQL("CREATE INDEX anno_span_idx ON zipkin_annotations(span_id)").execute()
         }
       } catch {
-        case e : Throwable => log.warning(e, "Unable to create indexes on span store db") 
+        case e : Throwable => log.warning("Unable to create indexes on span store db - continuing anyway") 
       }
     }
-    Await.result(installJob)
+    Await.result(installIndexesJob);
   }
 }
